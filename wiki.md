@@ -46,6 +46,10 @@ The app resolves a private key in this order:
 
 Both SCP-style remotes such as `git@github.com:cure-interactive/example.git` and `ssh://` remotes are normalized before matching. HTTPS remotes do not match SSH rules. Use **Preview Matches** to count matches against the current repository manifest before pulling.
 
+## Repository Order
+
+Refresh writes every discovered repository path to the top-level `repositories` list in `config.json`, sorted case-insensitively by full path. The GUI table uses that same order, and Pull processes the list strictly from first to last. A later Refresh removes paths that are no longer discovered and inserts newly discovered repositories into the deterministic order.
+
 ## Runtime Files
 
 The app may create:

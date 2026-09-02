@@ -14,6 +14,7 @@
     "default_key": "",
     "rules": []
   },
+  "repositories": [],
   "filters": {
     "allowed_roots": [],
     "disallowed_roots": []

@@ -759,6 +759,34 @@ def git_pull_ff_only(repo_path: str, ssh_key: str) -> Tuple[bool, Optional[str],
     return False, msg, False
 
 
+def ordered_repository_paths(paths: t.Iterable[str]) -> List[str]:
+  """Return unique normalized repository paths in deterministic display/pull order."""
+  by_identity: Dict[str, str] = {}
+  for path in paths:
+    normalized = path_safe(str(path or ""))
+    if normalized:
+      by_identity.setdefault(normalized.casefold(), normalized)
+  return sorted(by_identity.values(), key=lambda path: path.casefold())
+
+
+def order_repositories(repos: List[RepoState], configured_paths: t.Iterable[str]) -> List[RepoState]:
+  """Apply config order first and append any unlisted manifest entries alphabetically."""
+  by_path = {path_safe(str(repo.get("path", "") or "")).casefold(): repo for repo in repos if repo.get("path")}
+  ordered: List[RepoState] = []
+  used: set[str] = set()
+  for path in configured_paths:
+    identity = path_safe(str(path or "")).casefold()
+    if identity and identity in by_path and identity not in used:
+      ordered.append(by_path[identity])
+      used.add(identity)
+  remaining = [repo for identity, repo in by_path.items() if identity not in used]
+  remaining.sort(key=lambda repo: path_safe(str(repo.get("path", "") or "")).casefold())
+  ordered.extend(remaining)
+  for index, repo in enumerate(ordered, start=1):
+    repo["index"] = index
+  return ordered
+
+
 def load_repo_manifest_for_pull(repo_json: str, pull_filters_json: str) -> Tuple[ManifestV2, List[RepoState]]:
   """
   Loads repository_manifest.json (any supported format) and returns:
@@ -770,6 +798,7 @@ def load_repo_manifest_for_pull(repo_json: str, pull_filters_json: str) -> Tuple
   manifest: ManifestV2 = load_manifest_v2(repo_json)
 
   cfg = read_json(pull_filters_json, required=True)
+  configured_paths = cfg.get("repositories", []) if isinstance(cfg, dict) else []
   filters_cfg = cfg.get("filters", {}) if isinstance(cfg, dict) else {}
   if not filters_cfg:
     filters_cfg = cfg.get("pull", {}) if isinstance(cfg, dict) else {}
@@ -799,7 +828,7 @@ def load_repo_manifest_for_pull(repo_json: str, pull_filters_json: str) -> Tuple
 
     out.append(r)
 
-  return manifest, out
+  return manifest, order_repositories(out, configured_paths)
 
 
 # =============================================================================
@@ -1218,6 +1247,8 @@ class App(ctk.CTk):
 
       manifest: ManifestV2 = load_manifest_v2(manifest_path)
       repos = manifest.get("repos", []) or []
+      cfg = read_json(_CONFIG_JSON, required=False, default={}) or {}
+      repos = order_repositories(repos, cfg.get("repositories", []) if isinstance(cfg, dict) else [])
 
       self._repo_state_by_path = repos_by_path(manifest)
 
@@ -2388,6 +2419,8 @@ class App(ctk.CTk):
           return
 
       self._ensure_restore_snapshot()
+      existing_cfg = read_json(_CONFIG_JSON, required=False, default={}) or {}
+      repository_paths = existing_cfg.get("repositories", []) if isinstance(existing_cfg, dict) else []
 
       scan_cfg = {
         "scan_roots": self._ui_get_listbox_items(self.lb_scan_roots),
@@ -2407,6 +2440,7 @@ class App(ctk.CTk):
       cfg = {
         "scan": scan_cfg,
         "ssh": ssh_cfg,
+        "repositories": ordered_repository_paths(repository_paths),
         "filters": filters_cfg,
       }
 
@@ -2533,6 +2567,7 @@ class App(ctk.CTk):
 
     skipped_by_filter = 0
     total_roots = len(scan_roots)
+    refreshed_repos: List[RepoState] = []
 
     for i, root in enumerate(scan_roots, start=1):
       if self._worker_stop.is_set():
@@ -2584,19 +2619,36 @@ class App(ctk.CTk):
 
         r["ssh_key_source"] = key_source
         r["remote_url"] = remote_url
+        refreshed_repos.append(r)
 
         # Update in-memory map used by tooltips
         self._repo_state_by_path[repo_path] = byp[repo_path]
 
-        self._ui_q.put(("tree_add", (repo_path, key, key_source, "Found", ts_short(seen), ts_short(str(r.get("pulled_at", "") or "")))))
-
       self._ui_q.put(("progress", min(1.0, i / max(1, total_roots))))
+
+    ordered_repos = order_repositories(refreshed_repos, [])
+    manifest["repos"] = ordered_repos
+    self._repo_state_by_path = repos_by_path(manifest)
+    for repo in ordered_repos:
+      self._ui_q.put((
+        "tree_add",
+        (
+          str(repo.get("path", "") or ""),
+          str(repo.get("ssh_key", "") or ""),
+          str(repo.get("ssh_key_source", "") or ""),
+          "Found",
+          ts_short(str(repo.get("seen_at", "") or "")),
+          ts_short(str(repo.get("pulled_at", "") or "")),
+        ),
+      ))
 
     dry = self.var_dry_run.get()
     if dry:
       self._log("warn", f"🧪 DRY RUN: Would write v2 manifest with {len(manifest.get('repos', []) or [])} repos to: {manifest_json_abs}")
     else:
       save_manifest_v2(manifest_json_abs, manifest, dry_run=False)
+      cfg["repositories"] = [str(repo.get("path", "") or "") for repo in ordered_repos]
+      write_json(_CONFIG_JSON, cfg, indent=2)
       self._log("ok", f"✅ Saved v2 manifest ({len(manifest.get('repos', []) or [])} repos) to {manifest_json_abs}")
 
     if skipped_by_filter:
