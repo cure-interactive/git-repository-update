@@ -37,9 +37,9 @@ On Linux or macOS, activate the virtual environment with `source .venv/bin/activ
 ## Configure And Run
 
 ```bash
-python git_repository_update.py
+python git-repository-update.py
 ```
 
-On first run, `config.json` is created from `config_default.json`. Add scan roots in the Config tab, run Refresh, then run Pull when the planned repository list looks correct.
+On first run, `config.json` is created from `config-default.json`. Add scan roots in the Config tab, run Refresh, then run Pull when the planned repository list looks correct.
 
 See `wiki.md` for detailed workflow notes.

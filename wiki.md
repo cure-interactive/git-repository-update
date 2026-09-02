@@ -6,7 +6,7 @@ Git Repository Update is a standalone desktop app for scanning local Git reposit
 
 ```bash
 python setup.py --venv
-python git_repository_update.py
+python git-repository-update.py
 ```
 
 Manual install:
@@ -15,14 +15,14 @@ Manual install:
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install -r requirements.txt
-python git_repository_update.py
+python git-repository-update.py
 ```
 
 On Linux or macOS, use `source .venv/bin/activate`.
 
 ## First Run
 
-On first run, `config.json` is created from `config_default.json`.
+On first run, `config.json` is created from `config-default.json`.
 
 In the app:
 
@@ -47,4 +47,4 @@ These are local runtime files and are ignored by Git.
 
 ## Vendored Helper
 
-`packages_custom/cure_repo_manifest.py` is included in this repository so the app does not depend on any sibling repository.
+`packages_custom/cure-repo-manifest.py` is included in this repository so the app does not depend on any sibling repository.

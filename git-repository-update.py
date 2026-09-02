@@ -53,6 +53,7 @@ Run:
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 import queue
@@ -71,19 +72,29 @@ from typing import Any, Dict, List, Optional, Tuple
 # =============================================================================
 
 _PACKAGES_CUSTOM_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "packages_custom"))
-if os.path.isdir(_PACKAGES_CUSTOM_DIR) and _PACKAGES_CUSTOM_DIR not in sys.path:
-  sys.path.insert(0, _PACKAGES_CUSTOM_DIR)
+_MANIFEST_HELPER_PATH = os.path.join(_PACKAGES_CUSTOM_DIR, "cure-repo-manifest.py")
 
-from cure_repo_manifest import (  # type: ignore
-  ManifestV2,
-  RepoState,
-  load_manifest_v2,
-  now_iso,
-  repos_by_path,
-  save_manifest_v2,
-  ts_short,
-  upsert_repo,
-)
+
+def _load_manifest_helper():
+  """Load the vendored helper whose kebab-case filename is not importable normally."""
+  spec = importlib.util.spec_from_file_location("cure_repo_manifest", _MANIFEST_HELPER_PATH)
+  if spec is None or spec.loader is None:
+    raise ImportError(f"Unable to load repository manifest helper: {_MANIFEST_HELPER_PATH}")
+  module = importlib.util.module_from_spec(spec)
+  sys.modules[spec.name] = module
+  spec.loader.exec_module(module)
+  return module
+
+
+_manifest_helper = _load_manifest_helper()
+ManifestV2 = _manifest_helper.ManifestV2
+RepoState = _manifest_helper.RepoState
+load_manifest_v2 = _manifest_helper.load_manifest_v2
+now_iso = _manifest_helper.now_iso
+repos_by_path = _manifest_helper.repos_by_path
+save_manifest_v2 = _manifest_helper.save_manifest_v2
+ts_short = _manifest_helper.ts_short
+upsert_repo = _manifest_helper.upsert_repo
 
 try:
   import customtkinter as ctk
@@ -302,7 +313,7 @@ ANSI_RESET = "\033[0m"
 _SCRIPT_DIR = os.path.abspath(os.path.dirname(__file__))
 
 # Root-level config files (no config/ directory)
-_CONFIG_DEFAULT_JSON = os.path.join(_SCRIPT_DIR, "config_default.json")
+_CONFIG_DEFAULT_JSON = os.path.join(_SCRIPT_DIR, "config-default.json")
 _CONFIG_JSON = os.path.join(_SCRIPT_DIR, "config.json")
 _CONFIG_RESTORE_JSON = os.path.join(_SCRIPT_DIR, "config_restore.json")
 
@@ -374,7 +385,7 @@ def _default_template_candidates(mode: str) -> List[str]:
 
 def ensure_defaults(*, overwrite: bool = False) -> None:
   """
-  Ensure root-level config.json exists by copying config_default.json if missing.
+  Ensure root-level config.json exists by copying config-default.json if missing.
   """
   if not os.path.exists(_CONFIG_DEFAULT_JSON):
     raise FileNotFoundError(_CONFIG_DEFAULT_JSON)
