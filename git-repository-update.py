@@ -63,6 +63,7 @@ import sys
 import threading
 import time
 import typing as t
+import urllib.parse
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -558,29 +559,122 @@ def extract_ssh_key_from_global_settings() -> str:
   return ""
 
 
+def get_origin_remote(repo_path: str) -> str:
+  try:
+    result = subprocess.run(
+      ["git", "-C", repo_path, "config", "--get", "remote.origin.url"],
+      check=False,
+      stdout=subprocess.PIPE,
+      stderr=subprocess.PIPE,
+      text=True,
+    )
+    return (result.stdout or "").strip() if result.returncode == 0 else ""
+  except OSError:
+    return ""
+
+
+def normalize_ssh_remote(remote_url: str) -> Tuple[str, Optional[int], str]:
+  """Normalize SSH and SCP-style Git remotes into host, port, and repository path."""
+  value = remote_url.strip()
+  if not value:
+    return "", None, ""
+
+  scp_match = re.fullmatch(r"(?:[^@/\s]+@)?([^:/\s]+):(.+)", value)
+  if scp_match and "://" not in value:
+    host = scp_match.group(1).lower()
+    path = scp_match.group(2).strip("/")
+    return host, None, path[:-4] if path.lower().endswith(".git") else path
+
+  parsed = urllib.parse.urlsplit(value)
+  if parsed.scheme.lower() not in {"ssh", "git+ssh"} or not parsed.hostname:
+    return "", None, ""
+  path = urllib.parse.unquote(parsed.path).strip("/")
+  return parsed.hostname.lower(), parsed.port, path[:-4] if path.lower().endswith(".git") else path
+
+
+def normalize_ssh_rule(rule: Dict[str, Any]) -> Dict[str, Any]:
+  port_value = rule.get("port")
+  try:
+    port = int(port_value) if str(port_value or "").strip() else None
+  except (TypeError, ValueError):
+    port = None
+  return {
+    "name": str(rule.get("name", "") or "").strip(),
+    "host": str(rule.get("host", "") or "").strip().lower(),
+    "port": port,
+    "path_prefix": str(rule.get("path_prefix", "") or "").strip().strip("/"),
+    "key": str(rule.get("key", "") or "").strip(),
+    "enabled": bool(rule.get("enabled", True)),
+  }
+
+
+def matching_ssh_rule(remote_url: str, rules: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+  host, port, remote_path = normalize_ssh_remote(remote_url)
+  if not host:
+    return None
+
+  matches: List[Tuple[int, int, Dict[str, Any]]] = []
+  for index, raw_rule in enumerate(rules):
+    rule = normalize_ssh_rule(raw_rule)
+    if not rule["enabled"] or not rule["host"] or rule["host"] != host:
+      continue
+    if rule["port"] is not None and rule["port"] != port:
+      continue
+    prefix = str(rule["path_prefix"])
+    if prefix and not (remote_path.casefold() == prefix.casefold() or remote_path.casefold().startswith(prefix.casefold() + "/")):
+      continue
+    specificity = len(prefix) + (10000 if rule["port"] is not None else 0)
+    matches.append((specificity, -index, rule))
+
+  return max(matches, default=(0, 0, None))[2]
+
+
+def resolve_repo_ssh_key(
+  repo_path: str,
+  default_key: str,
+  rules: List[Dict[str, Any]],
+) -> Tuple[str, str, str]:
+  """Resolve key, human-readable source, and origin URL for one repository."""
+  remote_url = get_origin_remote(repo_path)
+  remote_host, _remote_port, _remote_path = normalize_ssh_remote(remote_url)
+  if remote_url and not remote_host:
+    return "", "Non-SSH remote", remote_url
+  repo_key = extract_ssh_key_from_config(repo_path) or extract_ssh_key_from_registry(repo_path)
+  if repo_key:
+    return path_safe(repo_key), "Repository override", remote_url
+
+  rule = matching_ssh_rule(remote_url, rules)
+  if rule and rule.get("key"):
+    return path_safe(str(rule["key"])), f"Rule: {rule.get('name') or rule.get('host')}", remote_url
+  if default_key:
+    return path_safe(default_key), "Global fallback", remote_url
+
+  registry_key = extract_ssh_key_from_global_settings()
+  if registry_key:
+    return path_safe(registry_key), "TortoiseGit global", remote_url
+  return "", "SSH default", remote_url
+
+
 def find_git_repos_with_keys(
   root_path: str,
   default_key: str,
   ignore_prefixes: List[str],
   log_fn,
-) -> Dict[str, str]:
-  repo_keys: Dict[str, str] = {}
+  ssh_rules: Optional[List[Dict[str, Any]]] = None,
+) -> Dict[str, Tuple[str, str, str]]:
+  repo_keys: Dict[str, Tuple[str, str, str]] = {}
+  rules = ssh_rules or []
 
   for dirpath, dirnames, _filenames in os.walk(root_path):
     dirnames[:] = [d for d in dirnames if not should_skip_dir(d, ignore_prefixes)]
 
     if ".git" in dirnames:
       repo_path = path_safe(dirpath)
-      ssh_key = (
-        extract_ssh_key_from_config(repo_path)
-        or extract_ssh_key_from_registry(repo_path)
-        or extract_ssh_key_from_global_settings()
-        or default_key
-      )
-      repo_keys[repo_path] = path_safe(ssh_key) if ssh_key else ""
+      ssh_key, key_source, remote_url = resolve_repo_ssh_key(repo_path, default_key, rules)
+      repo_keys[repo_path] = (ssh_key, key_source, remote_url)
       dirnames[:] = []
       if ssh_key:
-        log_fn("info", f"🔑 Found repo: {repo_path}  (key: {repo_keys[repo_path]})")
+        log_fn("info", f"🔑 Found repo: {repo_path}  (key source: {key_source})")
       else:
         log_fn("warn", f"🔑 Found repo: {repo_path}  (key: <none>)")
 
@@ -725,6 +819,12 @@ class PullSettings:
   disallowed_roots: List[str]
 
 
+@dataclass
+class SshSettings:
+  default_key: str
+  rules: List[Dict[str, Any]]
+
+
 APP_TITLE = "Git Repository Update - Cure Interactive"
 
 class App(ctk.CTk):
@@ -763,6 +863,7 @@ class App(ctk.CTk):
 
     self.refresh_settings = self._load_refresh_settings_safe()
     self.pull_settings = self._load_pull_settings_safe()
+    self.ssh_settings = self._load_ssh_settings_safe()
 
     self._build_ui()
     self._pump_queues()
@@ -1023,7 +1124,7 @@ class App(ctk.CTk):
 
       # Fixed columns
       fixed = 0
-      for col in ("idx", "seen", "pulled", "status"):
+      for col in ("idx", "source", "seen", "pulled", "status"):
         try:
           fixed += int(tree.column(col, "width") or 0)
         except Exception:
@@ -1080,6 +1181,7 @@ class App(ctk.CTk):
 
       self.refresh_settings = self._load_refresh_settings_safe()
       self.pull_settings = self._load_pull_settings_safe()
+      self.ssh_settings = self._load_ssh_settings_safe()
       self._sync_settings_to_ui()
       self._ui_update_restore_button_state()
 
@@ -1095,6 +1197,7 @@ class App(ctk.CTk):
 
     self.refresh_settings = self._load_refresh_settings_safe()
     self.pull_settings = self._load_pull_settings_safe()
+    self.ssh_settings = self._load_ssh_settings_safe()
     self._sync_settings_to_ui()
     self._ui_update_restore_button_state()
 
@@ -1130,7 +1233,15 @@ class App(ctk.CTk):
         pulled = ts_short(str(r.get("pulled_at", "") or ""))
 
         if repo_path:
-          self._tree_add_row(repo_path, ssh_key, status, idx=int(r.get("index", 0) or 0) or None, last_seen=seen, last_pull=pulled)
+          self._tree_add_row(
+            repo_path,
+            ssh_key,
+            status,
+            key_source=str(r.get("ssh_key_source", "") or "Legacy manifest"),
+            idx=int(r.get("index", 0) or 0) or None,
+            last_seen=seen,
+            last_pull=pulled,
+          )
 
       try:
         self.lbl_status.configure(text=f"Idle ({len(repos)} repos loaded)")
@@ -1187,6 +1298,23 @@ class App(ctk.CTk):
     allowed_roots = [s for s in p.get("allowed_roots", []) if isinstance(s, str)]
     disallowed_roots = [s for s in p.get("disallowed_roots", []) if isinstance(s, str)]
     return PullSettings(allowed_roots=allowed_roots, disallowed_roots=disallowed_roots)
+
+  def _load_ssh_settings_safe(self) -> SshSettings:
+    try:
+      ensure_defaults(overwrite=False)
+      cfg = read_json(_CONFIG_JSON, required=True)
+      ssh_cfg = cfg.get("ssh", {}) if isinstance(cfg, dict) else {}
+      scan_cfg = cfg.get("scan", {}) if isinstance(cfg, dict) else {}
+      default_key = ssh_cfg.get("default_key", scan_cfg.get("default_ssh_key", ""))
+      rules = ssh_cfg.get("rules", [])
+    except Exception:
+      default_key = ""
+      rules = []
+    normalized_rules = [normalize_ssh_rule(rule) for rule in rules if isinstance(rule, dict)]
+    return SshSettings(
+      default_key=str(default_key or "") if isinstance(default_key, str) else "",
+      rules=normalized_rules,
+    )
 
   def _save_refresh_settings(self) -> None:
     # Kept for compatibility with existing button hooks; now writes config.json.
@@ -1294,7 +1422,7 @@ class App(ctk.CTk):
 
     self.tree = ttk.Treeview(
       repos_frame,
-      columns=("idx", "repo", "key", "seen", "pulled", "status"),
+      columns=("idx", "repo", "key", "source", "seen", "pulled", "status"),
       show="headings",
       height=1,  # let the frame decide height
       style="Treeview",
@@ -1304,6 +1432,7 @@ class App(ctk.CTk):
     self.tree.heading("idx", text="#", anchor="center")
     self.tree.heading("repo", text="Repository", anchor="w")
     self.tree.heading("key", text="SSH Key", anchor="w")
+    self.tree.heading("source", text="Key Source", anchor="w")
     self.tree.heading("seen", text="Last Seen", anchor="center")
     self.tree.heading("pulled", text="Last Pull", anchor="center")
     self.tree.heading("status", text="Status", anchor="center")
@@ -1312,6 +1441,7 @@ class App(ctk.CTk):
     self.tree.column("idx", width=56, minwidth=44, anchor="center", stretch=False)
     self.tree.column("repo", width=460, minwidth=180, anchor="w", stretch=True)
     self.tree.column("key", width=320, minwidth=140, anchor="w", stretch=True)
+    self.tree.column("source", width=160, minwidth=120, anchor="w", stretch=False)
     self.tree.column("seen", width=160, minwidth=140, anchor="center", stretch=False)
     self.tree.column("pulled", width=160, minwidth=140, anchor="center", stretch=False)
     self.tree.column("status", width=220, minwidth=180, anchor="center", stretch=False)
@@ -1400,11 +1530,9 @@ class App(ctk.CTk):
     self.tab_config.grid_rowconfigure(0, weight=1)
     self.tab_config.grid_rowconfigure(1, weight=0)
 
-    root = ctk.CTkFrame(self.tab_config)
+    root = ctk.CTkScrollableFrame(self.tab_config)
     root.grid(row=0, column=0, sticky="nsew", padx=10, pady=10)
     root.grid_columnconfigure(0, weight=1)
-    root.grid_rowconfigure(0, weight=1)
-    root.grid_rowconfigure(1, weight=0)
 
     # ----------------------------------------------------------------------------
     # Scan / Manifest (used by Refresh)
@@ -1431,10 +1559,10 @@ class App(ctk.CTk):
     ctk.CTkButton(scan_btns, text="Add Text…", command=lambda: self._lb_add_text(self.lb_scan_roots, "Add scan root")).grid(row=0, column=1, padx=6, pady=6)
     ctk.CTkButton(scan_btns, text="Remove", command=lambda: self._lb_remove_selected(self.lb_scan_roots)).grid(row=0, column=2, padx=6, pady=6)
 
-    # default_ssh_key
+    # Global fallback SSH key
     ctk.CTkLabel(
       scan,
-      text="default_ssh_key (valid: private PuTTY/OpenSSH key; invalid: public key)",
+      text="Global fallback SSH key (used only when no repository override or remote rule matches)",
     ).grid(row=4, column=0, padx=10, pady=(6, 2), sticky="w")
     key_row = ctk.CTkFrame(scan)
     key_row.grid(row=5, column=0, padx=10, pady=(0, 10), sticky="ew")
@@ -1461,10 +1589,57 @@ class App(ctk.CTk):
     self.lbl_manifest_path.grid(row=9, column=0, padx=10, pady=(0, 10), sticky="w")
 
     # ----------------------------------------------------------------------------
+    # SSH key routing rules
+    # ----------------------------------------------------------------------------
+    routing = ctk.CTkFrame(root)
+    routing.grid(row=1, column=0, sticky="ew", padx=10, pady=6)
+    routing.grid_columnconfigure(0, weight=1)
+
+    ctk.CTkLabel(
+      routing,
+      text="SSH key routing rules (repository override → most-specific remote rule → global fallback)",
+    ).grid(row=0, column=0, padx=10, pady=(10, 6), sticky="w")
+
+    columns = ("name", "remote", "key", "enabled", "matches")
+    self.tree_ssh_rules = ttk.Treeview(routing, columns=columns, show="headings", height=5, style="Treeview")
+    for column, heading, width in (
+      ("name", "Name", 160),
+      ("remote", "Remote namespace", 270),
+      ("key", "Private key", 360),
+      ("enabled", "Enabled", 70),
+      ("matches", "Matches", 70),
+    ):
+      self.tree_ssh_rules.heading(column, text=heading, anchor="w")
+      self.tree_ssh_rules.column(column, width=width, minwidth=60, anchor="w", stretch=column in {"remote", "key"})
+    self.tree_ssh_rules.grid(row=1, column=0, padx=10, pady=(0, 6), sticky="ew")
+    self.tree_ssh_rules.bind("<<TreeviewSelect>>", self._on_ssh_rule_selected)
+
+    editor = ctk.CTkFrame(routing)
+    editor.grid(row=2, column=0, padx=10, pady=6, sticky="ew")
+    for column in range(5):
+      editor.grid_columnconfigure(column, weight=1)
+
+    self.ent_rule_name = self._build_rule_entry(editor, "Name", 0)
+    self.ent_rule_host = self._build_rule_entry(editor, "Host", 1)
+    self.ent_rule_port = self._build_rule_entry(editor, "Port (optional)", 2)
+    self.ent_rule_prefix = self._build_rule_entry(editor, "Remote path prefix", 3)
+    self.ent_rule_key = self._build_rule_entry(editor, "Private key", 4)
+    ctk.CTkButton(editor, text="Browse…", width=100, command=self._browse_rule_key).grid(row=1, column=5, padx=6, pady=(0, 6))
+    self.var_rule_enabled = tk.BooleanVar(value=True)
+    ctk.CTkCheckBox(editor, text="Enabled", variable=self.var_rule_enabled).grid(row=1, column=6, padx=6, pady=(0, 6))
+
+    rule_actions = ctk.CTkFrame(routing)
+    rule_actions.grid(row=3, column=0, padx=10, pady=(0, 10), sticky="ew")
+    ctk.CTkButton(rule_actions, text="Add / Update", command=self._save_ssh_rule_from_editor).grid(row=0, column=0, padx=6, pady=6)
+    ctk.CTkButton(rule_actions, text="New", command=self._clear_ssh_rule_editor).grid(row=0, column=1, padx=6, pady=6)
+    ctk.CTkButton(rule_actions, text="Remove", command=self._remove_selected_ssh_rule).grid(row=0, column=2, padx=6, pady=6)
+    ctk.CTkButton(rule_actions, text="Preview Matches", command=self._preview_ssh_rule_matches).grid(row=0, column=3, padx=6, pady=6)
+
+    # ----------------------------------------------------------------------------
     # Filters (apply to BOTH Refresh (manifest creation) and Pull)
     # ----------------------------------------------------------------------------
     filters = ctk.CTkFrame(root)
-    filters.grid(row=1, column=0, sticky="ew", padx=10, pady=(6, 10))
+    filters.grid(row=2, column=0, sticky="ew", padx=10, pady=(6, 10))
     filters.grid_columnconfigure(0, weight=1)
     filters.grid_columnconfigure(1, weight=1)
 
@@ -1639,16 +1814,180 @@ class App(ctk.CTk):
     except Exception:
       pass
 
+  def _build_rule_entry(self, parent, label: str, column: int) -> ctk.CTkEntry:
+    ctk.CTkLabel(parent, text=label).grid(row=0, column=column, padx=6, pady=(6, 2), sticky="w")
+    entry = ctk.CTkEntry(parent, font=self._font_entry)
+    entry.grid(row=1, column=column, padx=6, pady=(0, 6), sticky="ew")
+    return entry
+
+  def _ssh_rule_remote_label(self, rule: Dict[str, Any]) -> str:
+    normalized = normalize_ssh_rule(rule)
+    port = f":{normalized['port']}" if normalized["port"] is not None else ""
+    prefix = f"/{normalized['path_prefix']}" if normalized["path_prefix"] else "/"
+    return f"{normalized['host']}{port}{prefix}"
+
+  def _render_ssh_rules(self, match_counts: Optional[Dict[int, int]] = None) -> None:
+    if not hasattr(self, "tree_ssh_rules"):
+      return
+    self.tree_ssh_rules.delete(*self.tree_ssh_rules.get_children())
+    counts = match_counts or {}
+    for index, rule in enumerate(self.ssh_settings.rules):
+      normalized = normalize_ssh_rule(rule)
+      self.tree_ssh_rules.insert(
+        "",
+        "end",
+        iid=f"rule-{index}",
+        values=(
+          normalized["name"],
+          self._ssh_rule_remote_label(normalized),
+          path_safe(str(normalized["key"])) if normalized["key"] else "",
+          "Yes" if normalized["enabled"] else "No",
+          counts.get(index, "—"),
+        ),
+      )
+
+  def _selected_ssh_rule_index(self) -> Optional[int]:
+    selected = self.tree_ssh_rules.selection() if hasattr(self, "tree_ssh_rules") else ()
+    if not selected or not selected[0].startswith("rule-"):
+      return None
+    try:
+      return int(selected[0].split("-", 1)[1])
+    except ValueError:
+      return None
+
+  def _on_ssh_rule_selected(self, _event=None) -> None:
+    index = self._selected_ssh_rule_index()
+    if index is None or index >= len(self.ssh_settings.rules):
+      return
+    rule = normalize_ssh_rule(self.ssh_settings.rules[index])
+    for entry, value in (
+      (self.ent_rule_name, rule["name"]),
+      (self.ent_rule_host, rule["host"]),
+      (self.ent_rule_port, "" if rule["port"] is None else str(rule["port"])),
+      (self.ent_rule_prefix, rule["path_prefix"]),
+      (self.ent_rule_key, rule["key"]),
+    ):
+      entry.delete(0, "end")
+      entry.insert(0, value)
+    self.var_rule_enabled.set(bool(rule["enabled"]))
+
+  def _clear_ssh_rule_editor(self) -> None:
+    if hasattr(self, "tree_ssh_rules"):
+      self.tree_ssh_rules.selection_remove(*self.tree_ssh_rules.selection())
+    for entry in (self.ent_rule_name, self.ent_rule_host, self.ent_rule_port, self.ent_rule_prefix, self.ent_rule_key):
+      entry.delete(0, "end")
+    self.var_rule_enabled.set(True)
+
+  def _browse_rule_key(self) -> None:
+    path = filedialog.askopenfilename(
+      initialdir=_SCRIPT_DIR,
+      title="Select an SSH private key for this rule",
+      filetypes=(("All files", "*"), ("PuTTY private keys", "*.ppk")),
+    )
+    if not path or not self._validate_default_key(path):
+      return
+    self.ent_rule_key.delete(0, "end")
+    self.ent_rule_key.insert(0, path)
+
+  def _save_ssh_rule_from_editor(self) -> None:
+    port_text = self.ent_rule_port.get().strip()
+    try:
+      port = int(port_text) if port_text else None
+    except ValueError:
+      messagebox.showerror("Invalid SSH rule", "Port must be a whole number from 1 through 65535.")
+      return
+    if port is not None and not 1 <= port <= 65535:
+      messagebox.showerror("Invalid SSH rule", "Port must be from 1 through 65535.")
+      return
+
+    key = self.ent_rule_key.get().strip()
+    if not key or not self._validate_default_key(key):
+      if not key:
+        messagebox.showerror("Invalid SSH rule", "Select a private key for this rule.")
+      return
+    host = self.ent_rule_host.get().strip().lower()
+    if not host or any(char in host for char in "/:@ "):
+      messagebox.showerror("Invalid SSH rule", "Host must be a hostname only, such as github.com.")
+      return
+    prefix = self.ent_rule_prefix.get().strip().strip("/")
+    name = self.ent_rule_name.get().strip() or f"{host}/{prefix}".rstrip("/")
+    rule = normalize_ssh_rule({
+      "name": name,
+      "host": host,
+      "port": port,
+      "path_prefix": prefix,
+      "key": key,
+      "enabled": self.var_rule_enabled.get(),
+    })
+
+    index = self._selected_ssh_rule_index()
+    for other_index, other_rule in enumerate(self.ssh_settings.rules):
+      other = normalize_ssh_rule(other_rule)
+      if other_index == index:
+        continue
+      if (
+        other["host"] == rule["host"]
+        and other["port"] == rule["port"]
+        and str(other["path_prefix"]).casefold() == str(rule["path_prefix"]).casefold()
+      ):
+        messagebox.showerror(
+          "Duplicate SSH rule",
+          "Another rule already owns this host, port, and path prefix. Edit that rule or choose a more-specific namespace.",
+        )
+        return
+    if index is None:
+      self.ssh_settings.rules.append(rule)
+    else:
+      self.ssh_settings.rules[index] = rule
+    self._render_ssh_rules()
+    self._save_config_now(reason="ssh-rule-saved")
+    self._clear_ssh_rule_editor()
+
+  def _remove_selected_ssh_rule(self) -> None:
+    index = self._selected_ssh_rule_index()
+    if index is None:
+      messagebox.showwarning("No SSH rule selected", "Select a routing rule to remove.")
+      return
+    del self.ssh_settings.rules[index]
+    self._render_ssh_rules()
+    self._save_config_now(reason="ssh-rule-removed")
+    self._clear_ssh_rule_editor()
+
+  def _preview_ssh_rule_matches(self) -> None:
+    manifest = load_manifest_v2(path_safe(_REPOSITORY_MANIFEST_JSON))
+    repos = manifest.get("repos", []) or []
+    counts = {index: 0 for index in range(len(self.ssh_settings.rules))}
+    unmatched = 0
+    for repo in repos:
+      repo_path = str(repo.get("path", "") or "")
+      remote_url = str(repo.get("remote_url", "") or "") or get_origin_remote(repo_path)
+      matched = matching_ssh_rule(remote_url, self.ssh_settings.rules)
+      if matched is None:
+        unmatched += 1
+        continue
+      for index, rule in enumerate(self.ssh_settings.rules):
+        if normalize_ssh_rule(rule) == matched:
+          counts[index] += 1
+          break
+    self._render_ssh_rules(counts)
+    messagebox.showinfo(
+      "SSH rule preview",
+      f"Previewed {len(repos)} repositories from the current manifest.\n"
+      f"Matched by a rule: {sum(counts.values())}\n"
+      f"Using repository override, fallback, or SSH default: {unmatched}",
+    )
+
   def _sync_settings_to_ui(self) -> None:
     self._ui_set_listbox(self.lb_scan_roots, self.refresh_settings.scan_roots)
     self._ui_set_listbox(self.lb_allowed_roots, self.pull_settings.allowed_roots)
     self._ui_set_listbox(self.lb_disallowed_roots, self.pull_settings.disallowed_roots)
 
     self.ent_default_key.delete(0, "end")
-    self.ent_default_key.insert(0, self.refresh_settings.default_ssh_key)
+    self.ent_default_key.insert(0, self.ssh_settings.default_key)
 
     self.txt_ignore.delete("1.0", "end")
     self.txt_ignore.insert("1.0", "\n".join(self.refresh_settings.ignore_prefixes))
+    self._render_ssh_rules()
 
     if hasattr(self, "lbl_manifest_path"):
       try:
@@ -1780,9 +2119,9 @@ class App(ctk.CTk):
         for iid in self.tree.get_children():
           self.tree.delete(iid)
       elif kind == "tree_add":
-        # payload: (repo, key, status, last_seen, last_pull)
-        repo, key, status, last_seen, last_pull = payload
-        self._tree_add_row(repo, key, status, last_seen=last_seen, last_pull=last_pull)
+        # payload: (repo, key, source, status, last_seen, last_pull)
+        repo, key, source, status, last_seen, last_pull = payload
+        self._tree_add_row(repo, key, status, key_source=source, last_seen=last_seen, last_pull=last_pull)
 
       elif kind == "tree_update_by_repo":
         # payload: (repo, key, status, last_seen, last_pull)
@@ -1797,6 +2136,7 @@ class App(ctk.CTk):
     key: str,
     status: str,
     *,
+    key_source: str = "",
     idx: Optional[int] = None,
     last_seen: str = "—",
     last_pull: str = "—",
@@ -1804,7 +2144,7 @@ class App(ctk.CTk):
     next_idx = idx if (idx is not None) else (len(self.tree.get_children()) + 1)
     zebra = "even" if ((next_idx) % 2 == 0) else "odd"
     tags = (self._tree_compose_row_tag(status, zebra),)
-    self.tree.insert("", "end", values=(str(next_idx), repo, key, last_seen, last_pull, status), tags=tags)
+    self.tree.insert("", "end", values=(str(next_idx), repo, key, key_source, last_seen, last_pull, status), tags=tags)
 
   def _tree_update(
     self,
@@ -1818,15 +2158,16 @@ class App(ctk.CTk):
     # Find row by repo (repo is column #2 -> index 1)
     for iid in self.tree.get_children():
       vals = self.tree.item(iid, "values")
-      if vals and len(vals) >= 6 and vals[1] == repo:
+      if vals and len(vals) >= 7 and vals[1] == repo:
         zebra = self._tree_zebra_from_existing_row(iid)
         tags = (self._tree_compose_row_tag(status, zebra),)
 
         row_idx = vals[0]
-        seen = last_seen if (last_seen is not None) else (vals[3] if len(vals) >= 4 else "—")
-        pulled = last_pull if (last_pull is not None) else (vals[4] if len(vals) >= 5 else "—")
+        source = vals[3]
+        seen = last_seen if (last_seen is not None) else (vals[4] if len(vals) >= 5 else "—")
+        pulled = last_pull if (last_pull is not None) else (vals[5] if len(vals) >= 6 else "—")
 
-        self.tree.item(iid, values=(row_idx, repo, key, seen, pulled, status), tags=tags)
+        self.tree.item(iid, values=(row_idx, repo, key, source, seen, pulled, status), tags=tags)
         return
 
     # If missing, append as a new row
@@ -2041,13 +2382,21 @@ class App(ctk.CTk):
       default_ssh_key = self.ent_default_key.get().strip()
       if not self._validate_default_key(default_ssh_key):
         return
+      for rule in self.ssh_settings.rules:
+        rule_key = str(rule.get("key", "") or "").strip()
+        if not rule_key or not self._validate_default_key(rule_key):
+          return
 
       self._ensure_restore_snapshot()
 
       scan_cfg = {
         "scan_roots": self._ui_get_listbox_items(self.lb_scan_roots),
         "ignore_prefixes": self._ui_get_ignore_prefixes(),
-        "default_ssh_key": default_ssh_key,
+      }
+
+      ssh_cfg = {
+        "default_key": default_ssh_key,
+        "rules": [normalize_ssh_rule(rule) for rule in self.ssh_settings.rules],
       }
 
       filters_cfg = {
@@ -2057,10 +2406,12 @@ class App(ctk.CTk):
 
       cfg = {
         "scan": scan_cfg,
+        "ssh": ssh_cfg,
         "filters": filters_cfg,
       }
 
       write_json(_CONFIG_JSON, cfg, indent=2)
+      self.ssh_settings.default_key = default_ssh_key
       self._ui_update_restore_button_state()
       self._log("info", f"💾 Auto-saved config.json ({reason})")
     except Exception as e:
@@ -2138,9 +2489,12 @@ class App(ctk.CTk):
     if not filters_cfg:
       filters_cfg = cfg.get("pull", {}) if isinstance(cfg, dict) else {}
 
+    ssh_cfg = cfg.get("ssh", {}) if isinstance(cfg, dict) else {}
+
     scan_roots = scan_cfg.get("scan_roots", [])
     ignore_prefixes = scan_cfg.get("ignore_prefixes", ["$"])
-    default_ssh_key = scan_cfg.get("default_ssh_key", "")
+    default_ssh_key = ssh_cfg.get("default_key", scan_cfg.get("default_ssh_key", ""))
+    ssh_rules = [normalize_ssh_rule(rule) for rule in ssh_cfg.get("rules", []) if isinstance(rule, dict)]
 
     scan_roots = [s for s in scan_roots if isinstance(s, str)]
     ignore_prefixes = [s for s in ignore_prefixes if isinstance(s, str)]
@@ -2193,10 +2547,11 @@ class App(ctk.CTk):
         self._ui_q.put(("progress", min(1.0, i / max(1, total_roots))))
         continue
 
-      repo_keys = find_git_repos_with_keys(root_abs, default_ssh_key_abs, ignore_prefixes, self._log)
-      for repo_path, key in repo_keys.items():
+      repo_keys = find_git_repos_with_keys(root_abs, default_ssh_key_abs, ignore_prefixes, self._log, ssh_rules)
+      for repo_path, key_resolution in repo_keys.items():
 
         repo_path = path_safe(repo_path)
+        key, key_source, remote_url = key_resolution
         key = path_safe(key)
 
         if not _passes_filters(repo_path):
@@ -2227,10 +2582,13 @@ class App(ctk.CTk):
             seen_at=seen,
           )
 
+        r["ssh_key_source"] = key_source
+        r["remote_url"] = remote_url
+
         # Update in-memory map used by tooltips
         self._repo_state_by_path[repo_path] = byp[repo_path]
 
-        self._ui_q.put(("tree_add", (repo_path, key, "Found", ts_short(seen), ts_short(str(r.get("pulled_at", "") or "")))))
+        self._ui_q.put(("tree_add", (repo_path, key, key_source, "Found", ts_short(seen), ts_short(str(r.get("pulled_at", "") or "")))))
 
       self._ui_q.put(("progress", min(1.0, i / max(1, total_roots))))
 

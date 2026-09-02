@@ -28,11 +28,23 @@ In the app:
 
 1. Open the Config tab.
 2. Add one or more scan roots, for example `D:\Repos`.
-3. Optionally set a default SSH key.
-4. Save or allow auto-save.
-5. Run Refresh to scan repositories.
-6. Review the table.
-7. Run Pull with dry-run enabled first.
+3. Optionally set a global fallback SSH key.
+4. Add SSH routing rules for remote hosts or organization path prefixes that require different keys.
+5. Save or allow auto-save.
+6. Run Refresh to scan repositories.
+7. Review the table, including the Key Source column.
+8. Run Pull with dry-run enabled first.
+
+## SSH Key Routing
+
+The app resolves a private key in this order:
+
+1. A key explicitly configured for the repository.
+2. The most-specific enabled rule matching the normalized SSH remote host, optional port, and path prefix.
+3. The global fallback key.
+4. A TortoiseGit global key or the normal SSH configuration when no app key applies.
+
+Both SCP-style remotes such as `git@github.com:cure-interactive/example.git` and `ssh://` remotes are normalized before matching. HTTPS remotes do not match SSH rules. Use **Preview Matches** to count matches against the current repository manifest before pulling.
 
 ## Runtime Files
 

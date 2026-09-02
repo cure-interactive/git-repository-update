@@ -8,8 +8,11 @@
       ".Trash",
       ".Trash-1000",
       ".cache"
-    ],
-    "default_ssh_key": ""
+    ]
+  },
+  "ssh": {
+    "default_key": "",
+    "rules": []
   },
   "filters": {
     "allowed_roots": [],

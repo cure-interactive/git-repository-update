@@ -6,7 +6,7 @@ CustomTkinter app for scanning local Git repositories and updating them in bulk.
 
 - Scans configured roots for Git repositories
 - Records repository status in `repository_manifest.json`
-- Detects SSH key configuration where possible
+- Routes validated PuTTY and OpenSSH private keys by repository override, remote namespace, or global fallback
 - Runs `git pull --ff-only` across selected repositories
 - Supports dry-run workflows
 
