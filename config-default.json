@@ -1,8 +1,6 @@
 {
   "scan": {
-    "scan_roots": [
-      ""
-    ],
+    "scan_roots": [],
     "ignore_prefixes": [
       "$",
       "System Volume Information",

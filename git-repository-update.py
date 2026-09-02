@@ -1115,12 +1115,12 @@ class App(ctk.CTk):
     except Exception:
       r = {}
 
-    scan_roots = [s for s in r.get("scan_roots", []) if isinstance(s, str)]
+    scan_roots = [s for s in r.get("scan_roots", []) if isinstance(s, str) and s.strip()]
     ignore_prefixes = [s for s in r.get("ignore_prefixes", []) if isinstance(s, str)]
     default_ssh_key = r.get("default_ssh_key", "") if isinstance(r.get("default_ssh_key", ""), str) else ""
 
     return RefreshSettings(
-      scan_roots=scan_roots or [""],
+      scan_roots=scan_roots,
       ignore_prefixes=ignore_prefixes or ["$", "System Volume Information"],
       default_ssh_key=default_ssh_key,
     )
@@ -1386,7 +1386,10 @@ class App(ctk.CTk):
     ctk.CTkButton(scan_btns, text="Remove", command=lambda: self._lb_remove_selected(self.lb_scan_roots)).grid(row=0, column=2, padx=6, pady=6)
 
     # default_ssh_key
-    ctk.CTkLabel(scan, text="default_ssh_key").grid(row=4, column=0, padx=10, pady=(6, 2), sticky="w")
+    ctk.CTkLabel(
+      scan,
+      text="default_ssh_key (valid: private PuTTY .ppk; invalid: public .pub key)",
+    ).grid(row=4, column=0, padx=10, pady=(6, 2), sticky="w")
     key_row = ctk.CTkFrame(scan)
     key_row.grid(row=5, column=0, padx=10, pady=(0, 10), sticky="ew")
     key_row.grid_columnconfigure(0, weight=1)
@@ -1634,6 +1637,7 @@ class App(ctk.CTk):
     if not d:
       return
     lb.insert("end", d)
+    self._save_config_now(reason="folder-added")
 
   def _lb_add_text(self, lb: tk.Listbox, title: str) -> None:
     dialog = ctk.CTkInputDialog(text="Enter a path (absolute or relative to script):", title=title)
@@ -1641,14 +1645,14 @@ class App(ctk.CTk):
     if not v:
       return
     lb.insert("end", v)
-    self._autosave_debounced()
+    self._save_config_now(reason="path-added")
 
   def _lb_remove_selected(self, lb: tk.Listbox) -> None:
     sel = list(lb.curselection())
     sel.reverse()
     for idx in sel:
       lb.delete(idx)
-    self._autosave_debounced()
+    self._save_config_now(reason="path-removed")
 
   def _browse_key(self) -> None:
     p = filedialog.askopenfilename(initialdir=_SCRIPT_DIR, title="Select SSH key file (PuTTY .ppk or key path)")
@@ -1656,7 +1660,7 @@ class App(ctk.CTk):
       return
     self.ent_default_key.delete(0, "end")
     self.ent_default_key.insert(0, p)
-    self._autosave_debounced()
+    self._save_config_now(reason="ssh-key-selected")
 
   def _open_config_folder(self) -> None:
     try:
