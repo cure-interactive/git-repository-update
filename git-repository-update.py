@@ -733,6 +733,27 @@ def repo_has_upstream(repo_path: str) -> bool:
     return False
 
 
+def git_error_reason(error: str) -> str:
+  """Classify verbose Git output into a stable one- or two-word table reason."""
+  message = str(error or "").casefold()
+  categories = (
+    ("Local Changes", ("would be overwritten", "please commit your changes", "local changes to the following files")),
+    ("Diverged", ("not possible to fast-forward", "non-fast-forward", "divergent branches", "unrelated histories")),
+    ("SSH Key", ("invalid ssh private key", "load key", "identity file", "invalid format")),
+    ("Auth", ("authentication failed", "permission denied (publickey)", "could not read username", "terminal prompts disabled")),
+    ("Network", ("could not resolve host", "failed to connect", "connection timed out", "network is unreachable", "connection reset", "remote end hung up")),
+    ("Not Repository", ("not a git repository",)),
+    ("Missing Ref", ("couldn't find remote ref", "no such ref was fetched")),
+    ("Git Lock", ("index.lock", "another git process", "cannot lock ref")),
+    ("Disk Full", ("no space left on device", "disk full")),
+    ("Permission", ("permission denied", "access is denied")),
+  )
+  for reason, markers in categories:
+    if any(marker in message for marker in markers):
+      return reason
+  return "Git"
+
+
 def git_pull_ff_only(repo_path: str, ssh_key: str) -> Tuple[bool, Optional[str], bool]:
   """
   Returns: (success, error_msg, changed)
@@ -2834,12 +2855,14 @@ class App(ctk.CTk):
 
         else:
           # Real error (RED)
+          reason = git_error_reason(error_msg)
+          table_message = f"Error ({reason})"
           self._log("fail", f"❌ {repo_path} - {error_msg}")
           error_repos.append((repo_path, error_msg))
 
-          upsert_repo(manifest, repo_path, phase="error", message="Error", seen_at=seen_iso, last_error=error_msg)
+          upsert_repo(manifest, repo_path, phase="error", message=table_message, seen_at=seen_iso, last_error=error_msg)
           self._repo_state_by_path[repo_path] = repos_by_path(manifest).get(repo_path, RepoState(path=repo_path))
-          self._ui_q.put(("tree_update_by_repo", (repo_path, ssh_key, "Error", ts_short(seen_iso), ts_short(str(r.get("pulled_at", "") or "")))))
+          self._ui_q.put(("tree_update_by_repo", (repo_path, ssh_key, table_message, ts_short(seen_iso), ts_short(str(r.get("pulled_at", "") or "")))))
 
       else:
         pulled_iso = now_iso()

@@ -52,6 +52,8 @@ Refresh writes every discovered repository path to the top-level `repositories` 
 
 Repositories listed in `filters.pull_disabled` remain visible and ordered but are marked **Pull disabled** and skipped by both Pull All and Pull Selected. Use this for pinned releases, archived checkouts, and branches that require manual reconciliation.
 
+Failed pulls retain the complete Git diagnostic in the log and manifest while the table shows a compact reason such as **Error (Auth)**, **Error (Diverged)**, **Error (Local Changes)**, or **Error (Network)**.
+
 ## Runtime Files
 
 The app may create:
