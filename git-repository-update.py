@@ -1606,15 +1606,20 @@ class App(ctk.CTk):
     self.tab_config.grid_rowconfigure(0, weight=1)
     self.tab_config.grid_rowconfigure(1, weight=0)
 
-    root = ctk.CTkScrollableFrame(self.tab_config)
-    root.grid(row=0, column=0, sticky="nsew", padx=10, pady=10)
-    root.grid_columnconfigure(0, weight=1)
+    config_pages = ctk.CTkTabview(self.tab_config)
+    config_pages.grid(row=0, column=0, sticky="nsew", padx=10, pady=10)
+    scan_page = config_pages.add("Scan")
+    routing_page = config_pages.add("SSH Routing")
+    pull_page = config_pages.add("Pull Control")
+    for page in (scan_page, routing_page, pull_page):
+      page.grid_columnconfigure(0, weight=1)
+      page.grid_rowconfigure(0, weight=1)
 
     # ----------------------------------------------------------------------------
     # Scan / Manifest (used by Refresh)
     # ----------------------------------------------------------------------------
-    scan = ctk.CTkFrame(root)
-    scan.grid(row=0, column=0, sticky="nsew", padx=10, pady=(10, 6))
+    scan = ctk.CTkFrame(scan_page)
+    scan.grid(row=0, column=0, sticky="nsew", padx=6, pady=6)
     scan.grid_columnconfigure(0, weight=1)
     scan.grid_rowconfigure(7, weight=1)  # ignore_prefixes textbox expands
 
@@ -1667,9 +1672,10 @@ class App(ctk.CTk):
     # ----------------------------------------------------------------------------
     # SSH key routing rules
     # ----------------------------------------------------------------------------
-    routing = ctk.CTkFrame(root)
-    routing.grid(row=1, column=0, sticky="ew", padx=10, pady=6)
+    routing = ctk.CTkFrame(routing_page)
+    routing.grid(row=0, column=0, sticky="nsew", padx=6, pady=6)
     routing.grid_columnconfigure(0, weight=1)
+    routing.grid_rowconfigure(1, weight=1)
 
     ctk.CTkLabel(
       routing,
@@ -1677,7 +1683,7 @@ class App(ctk.CTk):
     ).grid(row=0, column=0, padx=10, pady=(10, 6), sticky="w")
 
     columns = ("name", "remote", "key", "enabled", "matches")
-    self.tree_ssh_rules = ttk.Treeview(routing, columns=columns, show="headings", height=5, style="Treeview")
+    self.tree_ssh_rules = ttk.Treeview(routing, columns=columns, show="headings", height=8, style="Treeview")
     for column, heading, width in (
       ("name", "Name", 160),
       ("remote", "Remote namespace", 270),
@@ -1687,22 +1693,22 @@ class App(ctk.CTk):
     ):
       self.tree_ssh_rules.heading(column, text=heading, anchor="w")
       self.tree_ssh_rules.column(column, width=width, minwidth=60, anchor="w", stretch=column in {"remote", "key"})
-    self.tree_ssh_rules.grid(row=1, column=0, padx=10, pady=(0, 6), sticky="ew")
+    self.tree_ssh_rules.grid(row=1, column=0, padx=10, pady=(0, 6), sticky="nsew")
     self.tree_ssh_rules.bind("<<TreeviewSelect>>", self._on_ssh_rule_selected)
 
     editor = ctk.CTkFrame(routing)
     editor.grid(row=2, column=0, padx=10, pady=6, sticky="ew")
-    for column in range(5):
+    for column in range(4):
       editor.grid_columnconfigure(column, weight=1)
 
     self.ent_rule_name = self._build_rule_entry(editor, "Name", 0)
     self.ent_rule_host = self._build_rule_entry(editor, "Host", 1)
     self.ent_rule_port = self._build_rule_entry(editor, "Port (optional)", 2)
-    self.ent_rule_prefix = self._build_rule_entry(editor, "Remote path prefix", 3)
-    self.ent_rule_key = self._build_rule_entry(editor, "Private key", 4)
-    ctk.CTkButton(editor, text="Browse…", width=100, command=self._browse_rule_key).grid(row=1, column=5, padx=6, pady=(0, 6))
     self.var_rule_enabled = tk.BooleanVar(value=True)
-    ctk.CTkCheckBox(editor, text="Enabled", variable=self.var_rule_enabled).grid(row=1, column=6, padx=6, pady=(0, 6))
+    ctk.CTkCheckBox(editor, text="Enabled", variable=self.var_rule_enabled).grid(row=1, column=3, padx=12, pady=(0, 6), sticky="w")
+    self.ent_rule_prefix = self._build_rule_entry(editor, "Remote path prefix", 0, row=2)
+    self.ent_rule_key = self._build_rule_entry(editor, "Private key", 1, row=2, columnspan=2)
+    ctk.CTkButton(editor, text="Browse…", width=100, command=self._browse_rule_key).grid(row=3, column=3, padx=6, pady=(0, 6), sticky="ew")
 
     rule_actions = ctk.CTkFrame(routing)
     rule_actions.grid(row=3, column=0, padx=10, pady=(0, 10), sticky="ew")
@@ -1714,73 +1720,78 @@ class App(ctk.CTk):
     # ----------------------------------------------------------------------------
     # Filters (apply to BOTH Refresh (manifest creation) and Pull)
     # ----------------------------------------------------------------------------
-    filters = ctk.CTkFrame(root)
-    filters.grid(row=2, column=0, sticky="ew", padx=10, pady=(6, 10))
+    filters = ctk.CTkFrame(pull_page)
+    filters.grid(row=0, column=0, sticky="nsew", padx=6, pady=6)
     filters.grid_columnconfigure(0, weight=1)
     filters.grid_columnconfigure(1, weight=1)
     filters.grid_columnconfigure(2, weight=1)
+    filters.grid_rowconfigure(2, weight=1)
 
     ctk.CTkLabel(filters, text="Repository inclusion and pull controls").grid(row=0, column=0, columnspan=3, padx=10, pady=(10, 6), sticky="w")
 
     # allowed_roots (left)
-    ctk.CTkLabel(filters, text="allowed_roots").grid(row=1, column=0, padx=10, pady=(6, 2), sticky="w")
+    ctk.CTkLabel(filters, text="Allowed roots (empty = all scanned repositories)").grid(row=1, column=0, padx=10, pady=(6, 2), sticky="w")
 
-    self.lb_allowed_roots = tk.Listbox(filters, height=6, font=("Segoe UI", _UI_FONT_LISTBOX))
-    self.lb_allowed_roots.grid(row=2, column=0, padx=10, pady=(0, 6), sticky="ew")
+    self.lb_allowed_roots = tk.Listbox(filters, height=12, font=("Segoe UI", _UI_FONT_LISTBOX))
+    self.lb_allowed_roots.grid(row=2, column=0, padx=10, pady=(0, 6), sticky="nsew")
     self._style_listbox(self.lb_allowed_roots)
 
     allow_btns = ctk.CTkFrame(filters)
     allow_btns.grid(row=3, column=0, padx=10, pady=(0, 10), sticky="ew")
-    allow_btns.grid_columnconfigure(3, weight=1)
+    for column in range(3):
+      allow_btns.grid_columnconfigure(column, weight=1)
 
-    ctk.CTkButton(allow_btns, text="Add Folder…", command=lambda: self._lb_add_folder(self.lb_allowed_roots)).grid(row=0, column=0, padx=6, pady=6)
-    ctk.CTkButton(allow_btns, text="Add Text…", command=lambda: self._lb_add_text(self.lb_allowed_roots, "Add allowed root")).grid(row=0, column=1, padx=6, pady=6)
-    ctk.CTkButton(allow_btns, text="Remove", command=lambda: self._lb_remove_selected(self.lb_allowed_roots)).grid(row=0, column=2, padx=6, pady=6)
+    ctk.CTkButton(allow_btns, text="Add Folder…", width=90, command=lambda: self._lb_add_folder(self.lb_allowed_roots)).grid(row=0, column=0, padx=3, pady=6, sticky="ew")
+    ctk.CTkButton(allow_btns, text="Add Text…", width=80, command=lambda: self._lb_add_text(self.lb_allowed_roots, "Add allowed root")).grid(row=0, column=1, padx=3, pady=6, sticky="ew")
+    ctk.CTkButton(allow_btns, text="Remove", width=70, command=lambda: self._lb_remove_selected(self.lb_allowed_roots)).grid(row=0, column=2, padx=3, pady=6, sticky="ew")
 
     # disallowed_roots (right)
-    ctk.CTkLabel(filters, text="disallowed_roots").grid(row=1, column=1, padx=10, pady=(6, 2), sticky="w")
+    ctk.CTkLabel(filters, text="Disallowed roots (excluded entirely)").grid(row=1, column=1, padx=10, pady=(6, 2), sticky="w")
 
-    self.lb_disallowed_roots = tk.Listbox(filters, height=6, font=("Segoe UI", _UI_FONT_LISTBOX))
-    self.lb_disallowed_roots.grid(row=2, column=1, padx=10, pady=(0, 6), sticky="ew")
+    self.lb_disallowed_roots = tk.Listbox(filters, height=12, font=("Segoe UI", _UI_FONT_LISTBOX))
+    self.lb_disallowed_roots.grid(row=2, column=1, padx=10, pady=(0, 6), sticky="nsew")
     self._style_listbox(self.lb_disallowed_roots)
 
     deny_btns = ctk.CTkFrame(filters)
     deny_btns.grid(row=3, column=1, padx=10, pady=(0, 10), sticky="ew")
-    deny_btns.grid_columnconfigure(3, weight=1)
+    for column in range(3):
+      deny_btns.grid_columnconfigure(column, weight=1)
 
-    ctk.CTkButton(deny_btns, text="Add Folder…", command=lambda: self._lb_add_folder(self.lb_disallowed_roots)).grid(row=0, column=0, padx=6, pady=6)
-    ctk.CTkButton(deny_btns, text="Add Text…", command=lambda: self._lb_add_text(self.lb_disallowed_roots, "Add disallowed root")).grid(row=0, column=1, padx=6, pady=6)
-    ctk.CTkButton(deny_btns, text="Remove", command=lambda: self._lb_remove_selected(self.lb_disallowed_roots)).grid(row=0, column=2, padx=6, pady=6)
+    ctk.CTkButton(deny_btns, text="Add Folder…", width=90, command=lambda: self._lb_add_folder(self.lb_disallowed_roots)).grid(row=0, column=0, padx=3, pady=6, sticky="ew")
+    ctk.CTkButton(deny_btns, text="Add Text…", width=80, command=lambda: self._lb_add_text(self.lb_disallowed_roots, "Add disallowed root")).grid(row=0, column=1, padx=3, pady=6, sticky="ew")
+    ctk.CTkButton(deny_btns, text="Remove", width=70, command=lambda: self._lb_remove_selected(self.lb_disallowed_roots)).grid(row=0, column=2, padx=3, pady=6, sticky="ew")
 
     # pull_disabled (listed but never bulk-pulled)
-    ctk.CTkLabel(filters, text="pull_disabled (exact repository paths)").grid(row=1, column=2, padx=10, pady=(6, 2), sticky="w")
+    ctk.CTkLabel(filters, text="Pull disabled (listed but skipped)").grid(row=1, column=2, padx=10, pady=(6, 2), sticky="w")
 
-    self.lb_pull_disabled = tk.Listbox(filters, height=6, font=("Segoe UI", _UI_FONT_LISTBOX))
-    self.lb_pull_disabled.grid(row=2, column=2, padx=10, pady=(0, 6), sticky="ew")
+    self.lb_pull_disabled = tk.Listbox(filters, height=12, font=("Segoe UI", _UI_FONT_LISTBOX))
+    self.lb_pull_disabled.grid(row=2, column=2, padx=10, pady=(0, 6), sticky="nsew")
     self._style_listbox(self.lb_pull_disabled)
 
     disabled_btns = ctk.CTkFrame(filters)
     disabled_btns.grid(row=3, column=2, padx=10, pady=(0, 10), sticky="ew")
-    disabled_btns.grid_columnconfigure(3, weight=1)
+    for column in range(3):
+      disabled_btns.grid_columnconfigure(column, weight=1)
 
-    ctk.CTkButton(disabled_btns, text="Add Folder…", command=lambda: self._lb_add_folder(self.lb_pull_disabled)).grid(row=0, column=0, padx=6, pady=6)
-    ctk.CTkButton(disabled_btns, text="Add Text…", command=lambda: self._lb_add_text(self.lb_pull_disabled, "Disable repository pull")).grid(row=0, column=1, padx=6, pady=6)
-    ctk.CTkButton(disabled_btns, text="Remove", command=lambda: self._lb_remove_selected(self.lb_pull_disabled)).grid(row=0, column=2, padx=6, pady=6)
+    ctk.CTkButton(disabled_btns, text="Add Folder…", width=90, command=lambda: self._lb_add_folder(self.lb_pull_disabled)).grid(row=0, column=0, padx=3, pady=6, sticky="ew")
+    ctk.CTkButton(disabled_btns, text="Add Text…", width=80, command=lambda: self._lb_add_text(self.lb_pull_disabled, "Disable repository pull")).grid(row=0, column=1, padx=3, pady=6, sticky="ew")
+    ctk.CTkButton(disabled_btns, text="Remove", width=70, command=lambda: self._lb_remove_selected(self.lb_pull_disabled)).grid(row=0, column=2, padx=3, pady=6, sticky="ew")
 
     # ----------------------------------------------------------------------------
     # Bottom actions
     # ----------------------------------------------------------------------------
     bottom = ctk.CTkFrame(self.tab_config)
     bottom.grid(row=1, column=0, sticky="ew", padx=10, pady=(0, 10))
-    bottom.grid_columnconfigure(6, weight=1)
+    for column in range(4):
+      bottom.grid_columnconfigure(column, weight=1)
 
     # Restore (disabled/grey if missing)
-    self.btn_restore_config = ctk.CTkButton(bottom, text="🧯 Restore config.json", command=self._restore_config_clicked, state="disabled")
-    self.btn_restore_config.grid(row=0, column=0, padx=8, pady=10)
+    self.btn_restore_config = ctk.CTkButton(bottom, text="Restore Config", command=self._restore_config_clicked, state="disabled")
+    self.btn_restore_config.grid(row=0, column=0, padx=6, pady=8, sticky="ew")
 
-    ctk.CTkButton(bottom, text="🔄 Reload From Disk", command=self._reload_settings_from_disk).grid(row=0, column=1, padx=8, pady=10)
-    ctk.CTkButton(bottom, text="🧩 Bootstrap Defaults (non-destructive)", command=self._bootstrap_defaults_clicked).grid(row=0, column=2, padx=8, pady=10)
-    ctk.CTkButton(bottom, text="📂 Open script folder", command=self._open_config_folder).grid(row=0, column=3, padx=8, pady=10)
+    ctk.CTkButton(bottom, text="Reload From Disk", command=self._reload_settings_from_disk).grid(row=0, column=1, padx=6, pady=8, sticky="ew")
+    ctk.CTkButton(bottom, text="Bootstrap Defaults", command=self._bootstrap_defaults_clicked).grid(row=0, column=2, padx=6, pady=8, sticky="ew")
+    ctk.CTkButton(bottom, text="Open Script Folder", command=self._open_config_folder).grid(row=0, column=3, padx=6, pady=8, sticky="ew")
 
     self._sync_settings_to_ui()
     self._ui_update_restore_button_state()
@@ -1906,10 +1917,10 @@ class App(ctk.CTk):
     except Exception:
       pass
 
-  def _build_rule_entry(self, parent, label: str, column: int) -> ctk.CTkEntry:
-    ctk.CTkLabel(parent, text=label).grid(row=0, column=column, padx=6, pady=(6, 2), sticky="w")
+  def _build_rule_entry(self, parent, label: str, column: int, *, row: int = 0, columnspan: int = 1) -> ctk.CTkEntry:
+    ctk.CTkLabel(parent, text=label).grid(row=row, column=column, columnspan=columnspan, padx=6, pady=(6, 2), sticky="w")
     entry = ctk.CTkEntry(parent, font=self._font_entry)
-    entry.grid(row=1, column=column, padx=6, pady=(0, 6), sticky="ew")
+    entry.grid(row=row + 1, column=column, columnspan=columnspan, padx=6, pady=(0, 6), sticky="ew")
     return entry
 
   def _ssh_rule_remote_label(self, rule: Dict[str, Any]) -> str:
