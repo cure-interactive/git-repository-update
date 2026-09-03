@@ -17,6 +17,7 @@
   "repositories": [],
   "filters": {
     "allowed_roots": [],
-    "disallowed_roots": []
+    "disallowed_roots": [],
+    "pull_disabled": []
   }
 }

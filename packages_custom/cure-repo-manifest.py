@@ -22,6 +22,7 @@ class RepoState(t.TypedDict, total=False):
   ssh_key: str
   ssh_key_source: str
   remote_url: str
+  pull_disabled: bool
 
   phase: str        # idle | queued | scanning | pulling | done | error | skipped | stopped
   message: str      # short label shown in the table

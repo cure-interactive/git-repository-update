@@ -719,6 +719,20 @@ def is_repo_bare(repo_path: str) -> bool:
     return False
 
 
+def repo_has_upstream(repo_path: str) -> bool:
+  try:
+    result = subprocess.run(
+      ["git", "-C", repo_path, "rev-parse", "--verify", "@{upstream}"],
+      check=False,
+      stdout=subprocess.PIPE,
+      stderr=subprocess.PIPE,
+      text=True,
+    )
+    return result.returncode == 0
+  except OSError:
+    return False
+
+
 def git_pull_ff_only(repo_path: str, ssh_key: str) -> Tuple[bool, Optional[str], bool]:
   """
   Returns: (success, error_msg, changed)
@@ -739,6 +753,8 @@ def git_pull_ff_only(repo_path: str, ssh_key: str) -> Tuple[bool, Optional[str],
 
   if is_repo_unborn(repo_path):
     return False, "Unborn HEAD (no commits). Skipping.", False
+  if not repo_has_upstream(repo_path):
+    return False, "No upstream configured. Skipping.", False
 
   try:
     result = subprocess.run(
@@ -805,6 +821,11 @@ def load_repo_manifest_for_pull(repo_json: str, pull_filters_json: str) -> Tuple
 
   allowed_prefixes = [path_safe(p) for p in filters_cfg.get("allowed_roots", []) if isinstance(p, str)]
   disallowed_prefixes = [path_safe(p) for p in filters_cfg.get("disallowed_roots", []) if isinstance(p, str)]
+  disabled_identities = {
+    path_safe(p).casefold()
+    for p in filters_cfg.get("pull_disabled", [])
+    if isinstance(p, str) and p.strip()
+  }
 
   out: List[RepoState] = []
   for r in (manifest.get("repos", []) or []):
@@ -821,6 +842,7 @@ def load_repo_manifest_for_pull(repo_json: str, pull_filters_json: str) -> Tuple
     # Normalize fields
     r["path"] = repo_path
     r["ssh_key"] = path_safe(str(r.get("ssh_key", "") or ""))
+    r["pull_disabled"] = repo_path.casefold() in disabled_identities
     if not r.get("message"):
       r["message"] = "Idle"
     if not r.get("phase"):
@@ -846,6 +868,7 @@ class RefreshSettings:
 class PullSettings:
   allowed_roots: List[str]
   disallowed_roots: List[str]
+  pull_disabled: List[str]
 
 
 @dataclass
@@ -1328,7 +1351,8 @@ class App(ctk.CTk):
 
     allowed_roots = [s for s in p.get("allowed_roots", []) if isinstance(s, str)]
     disallowed_roots = [s for s in p.get("disallowed_roots", []) if isinstance(s, str)]
-    return PullSettings(allowed_roots=allowed_roots, disallowed_roots=disallowed_roots)
+    pull_disabled = [s for s in p.get("pull_disabled", []) if isinstance(s, str)]
+    return PullSettings(allowed_roots=allowed_roots, disallowed_roots=disallowed_roots, pull_disabled=pull_disabled)
 
   def _load_ssh_settings_safe(self) -> SshSettings:
     try:
@@ -1673,8 +1697,9 @@ class App(ctk.CTk):
     filters.grid(row=2, column=0, sticky="ew", padx=10, pady=(6, 10))
     filters.grid_columnconfigure(0, weight=1)
     filters.grid_columnconfigure(1, weight=1)
+    filters.grid_columnconfigure(2, weight=1)
 
-    ctk.CTkLabel(filters, text="Filters (apply to Refresh + Pull)").grid(row=0, column=0, columnspan=2, padx=10, pady=(10, 6), sticky="w")
+    ctk.CTkLabel(filters, text="Repository inclusion and pull controls").grid(row=0, column=0, columnspan=3, padx=10, pady=(10, 6), sticky="w")
 
     # allowed_roots (left)
     ctk.CTkLabel(filters, text="allowed_roots").grid(row=1, column=0, padx=10, pady=(6, 2), sticky="w")
@@ -1705,6 +1730,21 @@ class App(ctk.CTk):
     ctk.CTkButton(deny_btns, text="Add Folder…", command=lambda: self._lb_add_folder(self.lb_disallowed_roots)).grid(row=0, column=0, padx=6, pady=6)
     ctk.CTkButton(deny_btns, text="Add Text…", command=lambda: self._lb_add_text(self.lb_disallowed_roots, "Add disallowed root")).grid(row=0, column=1, padx=6, pady=6)
     ctk.CTkButton(deny_btns, text="Remove", command=lambda: self._lb_remove_selected(self.lb_disallowed_roots)).grid(row=0, column=2, padx=6, pady=6)
+
+    # pull_disabled (listed but never bulk-pulled)
+    ctk.CTkLabel(filters, text="pull_disabled (exact repository paths)").grid(row=1, column=2, padx=10, pady=(6, 2), sticky="w")
+
+    self.lb_pull_disabled = tk.Listbox(filters, height=6, font=("Segoe UI", _UI_FONT_LISTBOX))
+    self.lb_pull_disabled.grid(row=2, column=2, padx=10, pady=(0, 6), sticky="ew")
+    self._style_listbox(self.lb_pull_disabled)
+
+    disabled_btns = ctk.CTkFrame(filters)
+    disabled_btns.grid(row=3, column=2, padx=10, pady=(0, 10), sticky="ew")
+    disabled_btns.grid_columnconfigure(3, weight=1)
+
+    ctk.CTkButton(disabled_btns, text="Add Folder…", command=lambda: self._lb_add_folder(self.lb_pull_disabled)).grid(row=0, column=0, padx=6, pady=6)
+    ctk.CTkButton(disabled_btns, text="Add Text…", command=lambda: self._lb_add_text(self.lb_pull_disabled, "Disable repository pull")).grid(row=0, column=1, padx=6, pady=6)
+    ctk.CTkButton(disabled_btns, text="Remove", command=lambda: self._lb_remove_selected(self.lb_pull_disabled)).grid(row=0, column=2, padx=6, pady=6)
 
     # ----------------------------------------------------------------------------
     # Bottom actions
@@ -2012,6 +2052,7 @@ class App(ctk.CTk):
     self._ui_set_listbox(self.lb_scan_roots, self.refresh_settings.scan_roots)
     self._ui_set_listbox(self.lb_allowed_roots, self.pull_settings.allowed_roots)
     self._ui_set_listbox(self.lb_disallowed_roots, self.pull_settings.disallowed_roots)
+    self._ui_set_listbox(self.lb_pull_disabled, self.pull_settings.pull_disabled)
 
     self.ent_default_key.delete(0, "end")
     self.ent_default_key.insert(0, self.ssh_settings.default_key)
@@ -2435,6 +2476,7 @@ class App(ctk.CTk):
       filters_cfg = {
         "allowed_roots": self._ui_get_listbox_items(self.lb_allowed_roots),
         "disallowed_roots": self._ui_get_listbox_items(self.lb_disallowed_roots),
+        "pull_disabled": ordered_repository_paths(self._ui_get_listbox_items(self.lb_pull_disabled)),
       }
 
       cfg = {
@@ -2535,6 +2577,11 @@ class App(ctk.CTk):
 
     allowed_prefixes = [path_safe(p) for p in filters_cfg.get("allowed_roots", []) if isinstance(p, str)]
     disallowed_prefixes = [path_safe(p) for p in filters_cfg.get("disallowed_roots", []) if isinstance(p, str)]
+    disabled_identities = {
+      path_safe(p).casefold()
+      for p in filters_cfg.get("pull_disabled", [])
+      if isinstance(p, str) and p.strip()
+    }
 
     def _passes_filters(repo_path: str) -> bool:
       safe_path = path_safe(repo_path)
@@ -2594,6 +2641,8 @@ class App(ctk.CTk):
           continue
 
         seen = now_iso()
+        pull_disabled = repo_path.casefold() in disabled_identities
+        found_message = "Pull disabled" if pull_disabled else "Found"
 
         # Preserve prior state if present
         r = byp.get(repo_path)
@@ -2603,7 +2652,7 @@ class App(ctk.CTk):
             repo_path,
             ssh_key=key,
             phase="idle",
-            message="Found",
+            message=found_message,
             seen_at=seen,
           )
           byp[repo_path] = r
@@ -2613,12 +2662,13 @@ class App(ctk.CTk):
             repo_path,
             ssh_key=key,
             phase=str(r.get("phase", "idle") or "idle"),
-            message="Found",
+            message=found_message,
             seen_at=seen,
           )
 
         r["ssh_key_source"] = key_source
         r["remote_url"] = remote_url
+        r["pull_disabled"] = pull_disabled
         refreshed_repos.append(r)
 
         # Update in-memory map used by tooltips
@@ -2636,7 +2686,7 @@ class App(ctk.CTk):
           str(repo.get("path", "") or ""),
           str(repo.get("ssh_key", "") or ""),
           str(repo.get("ssh_key_source", "") or ""),
-          "Found",
+          str(repo.get("message", "") or "Found"),
           ts_short(str(repo.get("seen_at", "") or "")),
           ts_short(str(repo.get("pulled_at", "") or "")),
         ),
@@ -2693,17 +2743,31 @@ class App(ctk.CTk):
 
     # Update in-memory state map
     self._repo_state_by_path = repos_by_path(manifest)
+    dry = self.var_dry_run.get()
 
     # Keep the full table visible.
-    # Only mark TARGET repos as queued (do NOT clear/rebuild the table).
+    # Mark enabled targets as queued and configured exclusions as skipped.
+    enabled_repos: List[RepoState] = []
     for r in repos:
       repo_path = path_safe(str(r.get("path", "") or ""))
       ssh_key = path_safe(str(r.get("ssh_key", "") or ""))
       seen = ts_short(str(r.get("seen_at", "") or ""))
       pulled = ts_short(str(r.get("pulled_at", "") or ""))
-      self._ui_q.put(("tree_update_by_repo", (repo_path, ssh_key, "Queued", seen, pulled)))
+      if bool(r.get("pull_disabled", False)):
+        upsert_repo(manifest, repo_path, phase="skipped", message="Pull disabled", last_error="")
+        self._ui_q.put(("tree_update_by_repo", (repo_path, ssh_key, "Pull disabled", seen, pulled)))
+        self._log("warn", f"🟨 {repo_path} - Pull disabled by config.")
+      else:
+        enabled_repos.append(r)
+        self._ui_q.put(("tree_update_by_repo", (repo_path, ssh_key, "Queued", seen, pulled)))
 
-    dry = self.var_dry_run.get()
+    repos = enabled_repos
+    if not repos:
+      self._log("warn", "⚠️  All matching repositories are pull-disabled.")
+      if not dry:
+        save_manifest_v2(path_safe(repo_list_path), manifest, dry_run=False)
+      return
+
     if dry:
       self._log("warn", "🧪 DRY RUN MODE: No git commands will be executed.")
 
@@ -2749,6 +2813,15 @@ class App(ctk.CTk):
           upsert_repo(manifest, repo_path, phase="skipped", message="Unborn (no commits)", seen_at=seen_iso, last_error="")
           self._repo_state_by_path[repo_path] = repos_by_path(manifest).get(repo_path, RepoState(path=repo_path))
           self._ui_q.put(("tree_update_by_repo", (repo_path, ssh_key, "Unborn (no commits)", ts_short(seen_iso), ts_short(str(r.get("pulled_at", "") or "")))))
+
+        elif "no upstream" in em or "no tracking information" in em:
+          msg = "No upstream configured"
+          self._log("warn", f"🟨 {repo_path} - {msg}.")
+          warn_repos.append((repo_path, msg))
+
+          upsert_repo(manifest, repo_path, phase="skipped", message="No upstream", seen_at=seen_iso, last_error="")
+          self._repo_state_by_path[repo_path] = repos_by_path(manifest).get(repo_path, RepoState(path=repo_path))
+          self._ui_q.put(("tree_update_by_repo", (repo_path, ssh_key, "No upstream", ts_short(seen_iso), ts_short(str(r.get("pulled_at", "") or "")))))
 
         elif "bare repository" in em or "no work tree" in em or "work tree" in em:
           msg = "Bare repository (no work tree)"

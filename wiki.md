@@ -50,6 +50,8 @@ Both SCP-style remotes such as `git@github.com:cure-interactive/example.git` and
 
 Refresh writes every discovered repository path to the top-level `repositories` list in `config.json`, sorted case-insensitively by full path. The GUI table uses that same order, and Pull processes the list strictly from first to last. A later Refresh removes paths that are no longer discovered and inserts newly discovered repositories into the deterministic order.
 
+Repositories listed in `filters.pull_disabled` remain visible and ordered but are marked **Pull disabled** and skipped by both Pull All and Pull Selected. Use this for pinned releases, archived checkouts, and branches that require manual reconciliation.
+
 ## Runtime Files
 
 The app may create:
